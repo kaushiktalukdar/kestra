@@ -71,9 +71,10 @@ public class FlowService {
             throw noRepositoryException();
         }
 
-        Flow withTenant = yamlFlowParser.parse(source, Flow.class).toBuilder()
+        FlowWithSource withTenant = yamlFlowParser.parse(source, Flow.class).toBuilder()
             .tenantId(tenantId)
-            .build();
+            .build()
+            .withSource(source);
 
         FlowRepositoryInterface flowRepository = this.flowRepository.get();
         Optional<FlowWithSource> flowWithSource = flowRepository
