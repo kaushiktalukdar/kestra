@@ -4,6 +4,7 @@ import dev.failsafe.Failsafe;
 import dev.failsafe.Timeout;
 import io.kestra.core.exceptions.TimeoutExceededException;
 import io.kestra.core.metrics.MetricRegistry;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.tasks.Output;
 import io.kestra.core.models.tasks.RunnableTask;
 import lombok.Getter;
@@ -50,10 +51,11 @@ public class WorkerTaskRunnable extends AbstractWorkerRunnable {
     }
 
     @Override
-    public void doRun() throws Exception {
+    public State.Type doCall() throws Exception {
         final Duration workerTaskTimeout = workerTask.getTask().getTimeout();
-        try {
-            if (workerTaskTimeout != null) {
+
+        if (workerTaskTimeout != null) {
+            try {
                 Timeout<Object> taskTimeout = Timeout
                     .builder(workerTaskTimeout)
                     .withInterrupt() // use to awake blocking tasks.
@@ -71,17 +73,18 @@ public class WorkerTaskRunnable extends AbstractWorkerRunnable {
                         .increment()
                     )
                     .run(() -> taskOutput = task.run(runContext));
-
-            } else {
-                taskOutput = task.run(runContext);
+            } catch (dev.failsafe.TimeoutExceededException e) {
+                kill(false);
+                this.exceptionHandler(new TimeoutExceededException(workerTaskTimeout));
             }
-            taskState = SUCCESS;
-            if (taskOutput != null && taskOutput.finalState().isPresent()) {
-                taskState = taskOutput.finalState().get();
-            }
-        } catch (dev.failsafe.TimeoutExceededException e) {
-            kill(false);
-            this.exceptionHandler(this, new TimeoutExceededException(workerTaskTimeout));
+        } else {
+            taskOutput = task.run(runContext);
         }
+
+        taskState = SUCCESS;
+        if (taskOutput != null && taskOutput.finalState().isPresent()) {
+            taskState = taskOutput.finalState().get();
+        }
+        return taskState;
     }
 }

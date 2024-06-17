@@ -10,6 +10,7 @@ import io.kestra.core.exceptions.DeserializationException;
 import io.kestra.core.metrics.MetricRegistry;
 import io.kestra.core.models.Label;
 import io.kestra.core.models.executions.*;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.triggers.*;
@@ -46,10 +47,8 @@ import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -131,8 +130,6 @@ public class Worker implements Service, Runnable, AutoCloseable {
     private final AtomicReference<ServiceState> state = new AtomicReference<>();
 
     private final List<Runnable> receiveCancellations = new ArrayList<>();
-
-    private final ThreadFactory workerThreadFactory = Thread.ofVirtual().name("WorkerThread").factory();
 
     private final Integer numThreads;
     private final AtomicInteger pendingJobCount = new AtomicInteger(0);
@@ -225,28 +222,18 @@ public class Worker implements Service, Runnable, AutoCloseable {
             either -> {
                 pendingJobCount.incrementAndGet();
 
-                executorService.execute(() -> {
-                    pendingJobCount.decrementAndGet();
-                    runningJobCount.incrementAndGet();
+                if (either.isRight()) {
+                    log.error("Unable to deserialize a worker job: {}", either.getRight().getMessage());
+                    handleDeserializationError(either.getRight());
+                    return;
+                }
 
-                    try {
-                        if (either.isRight()) {
-                            log.error("Unable to deserialize a worker job: {}", either.getRight().getMessage());
-                            handleDeserializationError(either.getRight());
-                            return;
-                        }
-
-                        WorkerJob workerTask = either.getLeft();
-                        if (workerTask instanceof WorkerTask task) {
-                            handleTask(task);
-                        } else if (workerTask instanceof WorkerTrigger trigger) {
-                            handleTrigger(trigger);
-                        }
-                    } finally {
-                        runningJobCount.decrementAndGet();
-                    }
-
-                });
+                WorkerJob workerTask = either.getLeft();
+                if (workerTask instanceof WorkerTask task) {
+                    handleTask(task);
+                } else if (workerTask instanceof WorkerTrigger trigger) {
+                    handleTrigger(trigger);
+                }
             }
         ));
         setState(ServiceState.RUNNING);
@@ -506,7 +493,7 @@ public class Worker implements Service, Runnable, AutoCloseable {
 
                             // here the realtime trigger fail before the publisher being call so we create a fail execution
                             if (workerRunnable.getException() != null || !state.equals(SUCCESS)) {
-                                this.handleRealtimeTriggerError(workerTrigger, workerThread.getException());
+                                this.handleRealtimeTriggerError(workerTrigger, workerRunnable.getException());
                             }
                         }
                     } catch (Exception e) {
@@ -777,32 +764,35 @@ public class Worker implements Service, Runnable, AutoCloseable {
     }
 
     private io.kestra.core.models.flows.State.Type runThread(AbstractWorkerRunnable workerJobRunnable, Logger logger) {
-        io.kestra.core.models.flows.State.Type state;
         synchronized (this) {
             workerRunnableReferences.add(workerJobRunnable);
         }
 
+        Future<State.Type> submit = executorService.submit(() -> {
+            pendingJobCount.decrementAndGet();
+            runningJobCount.incrementAndGet();
+
+            try {
+                return workerJobRunnable.call();
+            } finally {
+                runningJobCount.decrementAndGet();
+            }
+        });
+
         try {
-            // run it
-            Thread workerThread = workerThreadFactory.newThread(workerJobRunnable);
-            workerJobRunnable.setThread(workerThread);
-            workerThread.start();
-            workerThread.join();
-            state = workerJobRunnable.getTaskState();
-        } catch (InterruptedException e) {
-            logger.error("Failed to join the Worker thread: {}", e.getMessage(), e);
+            return submit.get();
+        } catch (InterruptedException | ExecutionException e) {
+            logger.error(e.getMessage(), e);
             if (workerJobRunnable instanceof WorkerTaskRunnable workerTaskRunnable) {
-                state = workerTaskRunnable.getWorkerTask().getTask().isAllowFailure() ? WARNING : FAILED;
+                return workerTaskRunnable.getWorkerTask().getTask().isAllowFailure() ? WARNING : FAILED;
             } else {
-                state = FAILED;
+                return FAILED;
             }
         } finally {
             synchronized (this) {
                 workerRunnableReferences.remove(workerJobRunnable);
             }
         }
-
-        return state;
     }
 
     private List<TaskRunAttempt> addAttempt(WorkerTask workerTask, TaskRunAttempt taskRunAttempt) {

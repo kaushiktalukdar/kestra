@@ -1,6 +1,7 @@
 package io.kestra.core.runners;
 
 import io.kestra.core.models.executions.Execution;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.triggers.PollingTriggerInterface;
 import lombok.Getter;
 
@@ -20,11 +21,12 @@ public class WorkerTriggerRunnable extends AbstractWorkerTriggerRunnable {
     }
 
     @Override
-    public void doRun() throws Exception {
+    public State.Type doCall() throws Exception {
         this.evaluate = this.pollingTrigger.evaluate(
             workerTrigger.getConditionContext().withRunContext(runContext),
             workerTrigger.getTriggerContext()
         );
         taskState = SUCCESS;
+        return taskState;
     }
 }
